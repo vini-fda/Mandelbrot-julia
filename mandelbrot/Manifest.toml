@@ -1,286 +1,3 @@
-### A Pluto.jl notebook ###
-# v0.16.0
-
-using Markdown
-using InteractiveUtils
-
-# ╔═╡ cf75ff13-67e3-45e9-817e-7b4ab0c2c313
-using Symbolics
-
-# ╔═╡ 03454819-2c57-452b-8e5a-5d9c830b68bc
-using Images, CUDA
-
-# ╔═╡ 4aabd3cf-ba68-468e-9ff8-dfd617c3ce89
-using Interpolations
-
-# ╔═╡ eede168a-1c05-11ec-250d-0bd9cde6d191
-md"""
-# Mandelbrot Fractal
-
-The Mandelbrot set is defined as the subset $\Omega$ of the complex plane of all the points $c \in \mathbb{C}$ such that the sequence $(z_n)$, defined by the recurrence
-
-$$\left\{
-\begin{aligned}
-z_0 &= c \\
-z_{n+1} &= z_n^2 + c
-\end{aligned}\right.$$
-
-is bounded as $n \to \infty$.
-
-In other words:
-
-$$\Omega = \left\{
-c \in \mathbb{C} | \exists L \in \mathbb{R} : \lim_{n \to \infty} |z_n(c)| = L
-\right\}$$
-"""
-
-# ╔═╡ 8ca585b2-34ab-4c62-86d8-41c0dfe53d4d
-md"""
-## Algorithm for computing the fractal
-
-For every point $c \in \mathbb{C}$ of the complex plane, we may iterate $z_n$ a finite amount of times(let's say, $N$), then check the final square of the absolute value/distance from the origin $D^2 = |z_N|^2$(or stop if for some $m < N$ we find $|z_m|^2 \ge D_{\max}^2$). We then color each point according to $D^2$.
-"""
-
-# ╔═╡ f6881202-9995-4d5e-a21b-cc2fe415aebc
-md"""
-The recurrence on $(z_n)$ is defined by the function
-
-$$f: z \mapsto z^2 + c$$
-
-and $z_0 = c$. 
-"""
-
-# ╔═╡ 35598077-d208-4696-94eb-465de499af0d
-function coloring(n)
-	# Taken from OLC's implementation
-	# Github link: https://github.com/OneLoneCoder/olcPixelGameEngine/blob/master/Videos/OneLoneCoder_PGE_Mandelbrot.cpp
-	a = 0.1;
-	return RGB(0.5 * sin(a * n) + 0.5, 
-			0.5 * sin(a * n + 2.094) + 0.5,  
-			0.5 * sin(a * n + 4.188) + 0.5)
-end
-
-# ╔═╡ a0a9607f-356e-4ce3-9a4d-94a24db008cd
-md"""
-## Interpolating image-space to world-space
-"""
-
-# ╔═╡ 4119e669-b8ed-47b0-aa64-e38b5b6a24d4
-md"""
-Interpolation correspondence:
-
-$$\begin{aligned}
-i \leftrightarrow y &: (1, h) \xrightarrow{\mathbf{T}_i} (-1, 1) \\
-
-j \leftrightarrow x &: (1, w) \xrightarrow{\mathbf{T}_j} (-w/h, w/h)\end{aligned}$$
-
-Equations for affine transforms $\mathbf{T}_i$ and $\mathbf{T}_j$:
-
-$$\begin{bmatrix}
-1 & 1\\
-h & 1
-\end{bmatrix}
-\begin{bmatrix}
-T_{ia}\\
-T_{ib}
-\end{bmatrix}=
-\begin{bmatrix}
--1\\
-1
-\end{bmatrix}$$
-
-$$\begin{bmatrix}
-1 & 1\\
-w & 1
-\end{bmatrix}
-\begin{bmatrix}
-T_{ja}\\
-T_{jb}
-\end{bmatrix}= \frac{w}{h} \cdot
-\begin{bmatrix}
--1\\
-1
-\end{bmatrix}$$
-
-Equation for final affine transformation:
-
-$$\underbrace{\alpha}_{e^{-\tau}}
-\left( 
-\begin{bmatrix}
-T_{ja} & 0\\
-0 & T_{ia}
-\end{bmatrix}
-\begin{bmatrix}
-j\\
-i
-\end{bmatrix} +
-\begin{bmatrix}
-T_{jb}\\
-T_{ib}
-\end{bmatrix}
-\right)
-+ \mathbf{z}_0 =
-\begin{bmatrix}
-x\\
-y
-\end{bmatrix}$$
-"""
-
-# ╔═╡ 9e5fe43c-cb95-4b1f-8329-41c2fee9c121
-@variables w, h, α, i, j, x_0, y_0
-
-# ╔═╡ 121e868d-21d5-4830-be07-0b6ce19f52cc
-begin
-	# Transform Ti
-	Ti = [1 1; h 1] \ [-1, 1] 
-	# Transform Tj
-	Tj = [1 1; w 1] \ [-w/h , w/h] 
-	
-	#A = [-1 -w/h; 1 w/h] * inv([1 1; h w])
-	interp_expr = α * [Tj[1]*j + Tj[2], Ti[1]*i + Ti[2]] + [x_0, y_0]
-end
-
-# ╔═╡ 7d2b340c-1f6e-4ec3-ae16-06399f947695
-begin
-	# Image dimensions
-	const width, height = 3840, 2160#1920, 1080#
-	# In-world dimensions
-	# Center of image
-	z0 = 0.33 + 0.05im ::Complex
-	# Zoom factor
-	τ = 5.5
-	zoom = exp(-τ)
-	
-	# Substituting concrete values in the iterpolation expression
-	interp_expr_sub = substitute.(interp_expr, (
-			Dict(w => width, h => height,
-				 α => exp(-τ), 
-				 x_0 => z0.re, y_0 => z0.im),
-			))
-end
-
-# ╔═╡ 73e38e33-36e6-4b3d-b0a6-235d02e3fce8
-begin
-	# Affine transformation constants
-	#j -> x
-	# f(j) = ax*j + bx
-	itp1 = interp_expr_sub[1]
-	Dj = Differential(j)
-	const ax = Symbolics.value(expand_derivatives(Dj(itp1)))
-	const bx = Symbolics.value(substitute(itp1, Dict(j => 0)))
-	#i -> y
-	# f(i) = ay*i + by
-	itp2 = interp_expr_sub[2]
-	Di = Differential(i)
-	const ay = Symbolics.value(expand_derivatives(Di(itp2)))
-	const by = Symbolics.value(substitute(itp2, Dict(i => 0)))
-end
-
-# ╔═╡ da82a5d2-266b-4362-b81c-c2d0a3378bd8
-begin
-	const max_iter = 1024
-end
-
-# ╔═╡ 005040ee-5f76-4a42-b070-ad280cf0cc11
-md"""
-## Calculating the function over a grid of pixels with CUDA
-"""
-
-# ╔═╡ 61dc6781-e1e5-4e43-b8e2-6895b24b04f0
-function gpu_mandelbrot(Z, index)
-	(i, j) = index.I
-	# Affine transformation
-	# Screen space to world space
-	x = ax*j + bx
-	y = ay*i + by
-	# Mandelbrot
-	c = x + y*im
-	z = c
-	iterations = 0
-	while CUDA.abs2(z) < 400.0 && iterations < max_iter
-	   z = z^2 + c 
-	   iterations += 1
-	end
-	Z = iterations
-	return Z
-end
-
-
-# ╔═╡ c6e9201d-3db8-4556-84db-45a2b4324da2
-begin
-	Z = CuArray{Float64}(undef, height, width);
-	CUDA.@sync begin
-		Z .= gpu_mandelbrot.(Z, CartesianIndices(Z));
-	end
-end
-
-# ╔═╡ 3534ee6b-28e5-4128-b4be-1b3d12f68d77
-img = coloring.(collect(Z))
-
-# ╔═╡ e9392211-8df7-4d01-980f-00409dbc1f31
-function kernel_mandelbrot!(Z)
-	id = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    stride = blockDim().x * gridDim().x
-
-    Nx, Ny = size(Z)
-
-    cind = CartesianIndices((Nx, Ny))
-	
-	
-	for k=id:stride:Nx*Ny
-		i = cind[k][1]
-        j = cind[k][2]
-		# Affine transformation
-		# Screen space to world space
-		x = ax*j + bx
-		y = ay*i + by
-		# Mandelbrot
-		c = x + y*im
-		z = c
-		iterations = 0
-		while CUDA.abs2(z) < 400.0 && iterations < max_iter
-		   z = z^2 + c 
-		   iterations += 1
-		end
-		@inbounds Z[i, j] = iterations
-
-    end
-	
-
-	return nothing
-end
-
-# ╔═╡ 01abaa3b-ac7c-4f69-b306-ff33e5551959
-begin
-	# Wonky stuff!
-	# TODO: FIX Kernel
-	#Z2 = CuArray{Float64}(undef, height, width);
-	#CUDA.@sync @cuda kernel_mandelbrot!(Z2);
-end
-
-# ╔═╡ 2d5ce2e2-417b-4194-a9ec-8b93aea05a2e
-#save("mandelbrot_CUDA_kernel.png", img2)
-
-# ╔═╡ 247febcd-1c2e-49ea-8066-b218367f2c4e
-#img2 = coloring.(collect(Z2))
-
-# ╔═╡ 00000000-0000-0000-0000-000000000001
-PLUTO_PROJECT_TOML_CONTENTS = """
-[deps]
-CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
-Images = "916415d5-f1e6-5110-898d-aaa5f9f070e0"
-Interpolations = "a98d9a8b-a2ab-59e6-89dd-64a1c18fca59"
-Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
-
-[compat]
-CUDA = "~3.4.2"
-Images = "~0.24.1"
-Interpolations = "~0.13.4"
-Symbolics = "~3.4.1"
-"""
-
-# ╔═╡ 00000000-0000-0000-0000-000000000002
-PLUTO_MANIFEST_TOML_CONTENTS = """
 # This file is machine-generated - editing it directly is not advised
 
 [[AbstractFFTs]]
@@ -332,6 +49,12 @@ version = "0.1.0"
 
 [[Base64]]
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+
+[[BenchmarkTools]]
+deps = ["JSON", "Logging", "Printf", "Profile", "Statistics", "UUIDs"]
+git-tree-sha1 = "61adeb0823084487000600ef8b1c00cc2474cd47"
+uuid = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+version = "1.2.0"
 
 [[Bijections]]
 git-tree-sha1 = "705e7822597b432ebe152baa844b49f8026df090"
@@ -553,9 +276,9 @@ uuid = "9fa8497b-333b-5362-9e8d-4d0656e87820"
 
 [[GPUArrays]]
 deps = ["Adapt", "LinearAlgebra", "Printf", "Random", "Serialization", "Statistics"]
-git-tree-sha1 = "7c39d767a9c55fafd01f7bc8b3fd0adf175fbc97"
+git-tree-sha1 = "69faa5f1c5706ca9ca067604acf797ee3a8ec6f6"
 uuid = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
-version = "8.1.0"
+version = "8.1.1"
 
 [[GPUCompiler]]
 deps = ["ExprTools", "InteractiveUtils", "LLVM", "Libdl", "Logging", "TimerOutputs", "UUIDs"]
@@ -723,6 +446,12 @@ git-tree-sha1 = "642a199af8b68253517b80bd3bfd17eb4e84df6e"
 uuid = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
 version = "1.3.0"
 
+[[JSON]]
+deps = ["Dates", "Mmap", "Parsers", "Unicode"]
+git-tree-sha1 = "8076680b162ada2a031f707ac7b4953e30667a37"
+uuid = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+version = "0.21.2"
+
 [[JpegTurbo_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "d735490ac75c5cb9f1b00d8b5509c11984dc6943"
@@ -731,9 +460,9 @@ version = "2.1.0+0"
 
 [[LLVM]]
 deps = ["CEnum", "LLVMExtra_jll", "Libdl", "Printf", "Unicode"]
-git-tree-sha1 = "36d95ecdfbc3240d728f68d73064d5b097fbf2ef"
+git-tree-sha1 = "756cd7ea042f82962d8d46e378c0f1863bb4dc0f"
 uuid = "929cbde3-209d-540e-8aea-75f648917ca0"
-version = "4.5.2"
+version = "4.5.3"
 
 [[LLVMExtra_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -926,6 +655,12 @@ git-tree-sha1 = "34c0e9ad262e5f7fc75b10a9952ca7692cfc5fbe"
 uuid = "d96e819e-fc66-5662-9728-84c9c7592b0a"
 version = "0.12.3"
 
+[[Parsers]]
+deps = ["Dates"]
+git-tree-sha1 = "9d8c00ef7a8d110787ff6f170579846f776133a9"
+uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
+version = "2.0.4"
+
 [[Pkg]]
 deps = ["Artifacts", "Dates", "Downloads", "LibGit2", "Libdl", "Logging", "Markdown", "Printf", "REPL", "Random", "SHA", "Serialization", "TOML", "Tar", "UUIDs", "p7zip_jll"]
 uuid = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
@@ -945,6 +680,10 @@ version = "1.2.2"
 [[Printf]]
 deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[[Profile]]
+deps = ["Printf"]
+uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 
 [[ProgressMeter]]
 deps = ["Distributed", "Printf"]
@@ -1180,9 +919,9 @@ version = "0.4.2"
 
 [[TiledIteration]]
 deps = ["OffsetArrays"]
-git-tree-sha1 = "52c5f816857bfb3291c7d25420b1f4aca0a74d18"
+git-tree-sha1 = "5683455224ba92ef59db72d10690690f4a8dc297"
 uuid = "06e1c1a7-607b-532d-9fad-de7d9aa2abac"
-version = "0.3.0"
+version = "0.3.1"
 
 [[TimerOutputs]]
 deps = ["ExprTools", "Printf"]
@@ -1243,30 +982,3 @@ uuid = "8e850ede-7688-5339-a07c-302acd2aaf8d"
 [[p7zip_jll]]
 deps = ["Artifacts", "Libdl"]
 uuid = "3f19e933-33d8-53b3-aaab-bd5110c3b7a0"
-"""
-
-# ╔═╡ Cell order:
-# ╟─eede168a-1c05-11ec-250d-0bd9cde6d191
-# ╟─8ca585b2-34ab-4c62-86d8-41c0dfe53d4d
-# ╟─f6881202-9995-4d5e-a21b-cc2fe415aebc
-# ╠═cf75ff13-67e3-45e9-817e-7b4ab0c2c313
-# ╠═03454819-2c57-452b-8e5a-5d9c830b68bc
-# ╠═35598077-d208-4696-94eb-465de499af0d
-# ╠═4aabd3cf-ba68-468e-9ff8-dfd617c3ce89
-# ╟─a0a9607f-356e-4ce3-9a4d-94a24db008cd
-# ╟─4119e669-b8ed-47b0-aa64-e38b5b6a24d4
-# ╠═9e5fe43c-cb95-4b1f-8329-41c2fee9c121
-# ╠═121e868d-21d5-4830-be07-0b6ce19f52cc
-# ╠═7d2b340c-1f6e-4ec3-ae16-06399f947695
-# ╠═73e38e33-36e6-4b3d-b0a6-235d02e3fce8
-# ╠═da82a5d2-266b-4362-b81c-c2d0a3378bd8
-# ╟─005040ee-5f76-4a42-b070-ad280cf0cc11
-# ╠═61dc6781-e1e5-4e43-b8e2-6895b24b04f0
-# ╠═c6e9201d-3db8-4556-84db-45a2b4324da2
-# ╠═3534ee6b-28e5-4128-b4be-1b3d12f68d77
-# ╠═e9392211-8df7-4d01-980f-00409dbc1f31
-# ╠═01abaa3b-ac7c-4f69-b306-ff33e5551959
-# ╠═2d5ce2e2-417b-4194-a9ec-8b93aea05a2e
-# ╠═247febcd-1c2e-49ea-8066-b218367f2c4e
-# ╟─00000000-0000-0000-0000-000000000001
-# ╟─00000000-0000-0000-0000-000000000002
